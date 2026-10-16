@@ -4038,7 +4038,7 @@ describe('fetchAntigravityQuota', () => {
       t
     );
 
-    expect(mocks.request).toHaveBeenCalledTimes(1);
+    expect(mocks.request).toHaveBeenCalledTimes(ANTIGRAVITY_QUOTA_SUMMARY_URLS.length);
     expect(mocks.request.mock.calls[0][0]).toMatchObject({
       url: ANTIGRAVITY_QUOTA_SUMMARY_URLS[0],
     });
@@ -4058,6 +4058,51 @@ describe('fetchAntigravityQuota', () => {
       ],
     });
     expect(result.quotaInventoryObserved).toBe(true);
+  });
+
+  it('merges quota summary groups across endpoints when daily omits Gemini', async () => {
+    mocks.getSubscription.mockResolvedValue(null);
+    const bucket = (id: string, window: string, remainingFraction: number) => ({
+      bucketId: id,
+      displayName: id,
+      window,
+      remainingFraction,
+      resetTime: '2026-07-02T00:00:00Z',
+    });
+    const claude = (fraction: number) => ({
+      displayName: 'Claude and GPT models',
+      buckets: [bucket('3p-weekly', 'weekly', fraction), bucket('3p-5h', '5h', fraction)],
+    });
+    const gemini = {
+      displayName: 'Gemini Models',
+      buckets: [bucket('gemini-weekly', 'weekly', 0.5), bucket('gemini-5h', '5h', 1)],
+    };
+    const ok = (groups: unknown[]) => ({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: { groups },
+    });
+    mocks.request
+      .mockResolvedValueOnce(ok([claude(0.2)]))
+      .mockResolvedValueOnce({ statusCode: 404, hasStatusCode: true, header: {}, bodyText: 'nf' })
+      .mockResolvedValueOnce(ok([gemini, claude(0.3)]));
+
+    const result = await fetchAntigravityQuota(
+      { name: 'ag-merge.json', type: 'antigravity', authIndex: 'ag-m', project_id: 'p' },
+      t
+    );
+
+    expect(mocks.request).toHaveBeenCalledTimes(ANTIGRAVITY_QUOTA_SUMMARY_URLS.length);
+    expect(result.groups.map((group) => group.label).sort()).toEqual([
+      'Claude and GPT models',
+      'Gemini Models',
+    ]);
+    const claudeGroup = result.groups.find((group) => group.label === 'Claude and GPT models');
+    expect(claudeGroup?.buckets[0].remainingFraction).toBe(0.3);
+    const geminiGroup = result.groups.find((group) => group.label === 'Gemini Models');
+    expect(geminiGroup?.buckets.map((b) => b.id).sort()).toEqual(['gemini-5h', 'gemini-weekly']);
   });
 
   it('preserves quota groups and marks rateLimited when subscription returns 429', async () => {

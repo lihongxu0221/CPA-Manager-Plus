@@ -300,7 +300,29 @@ export const fetchAntigravityQuota = async (
   let hadSuccess = false;
   let quotaInventoryObserved = false;
 
+  // Quota summary endpoints can disagree: the daily endpoint may omit groups
+  // (e.g. Gemini) that prod still reports. Query every summary endpoint and
+  // merge groups by id; later endpoints (prod is last) win on conflict.
+  const summaryUrls = new Set<string>(ANTIGRAVITY_QUOTA_SUMMARY_URLS);
+  const mergedSummaryGroups = new Map<string, AntigravityQuotaData['groups'][number]>();
+  let mergedServerTimeOffsetMs: number | null = null;
+
+  const finishWithMergedSummary = async (): Promise<AntigravityQuotaData> => {
+    const subscriptionResult = await subscriptionPromise;
+    return {
+      groups: [...mergedSummaryGroups.values()],
+      quotaInventoryObserved: true,
+      subscription: subscriptionResult.subscription,
+      serverTimeOffsetMs: mergedServerTimeOffsetMs,
+      ...(subscriptionResult.rateLimited ? { rateLimited: true } : {}),
+    };
+  };
+
   for (const url of [...ANTIGRAVITY_QUOTA_SUMMARY_URLS, ...ANTIGRAVITY_AVAILABLE_MODELS_URLS]) {
+    const isSummaryUrl = summaryUrls.has(url);
+    if (!isSummaryUrl && mergedSummaryGroups.size > 0) {
+      return finishWithMergedSummary();
+    }
     try {
       const result = await apiCallApi.request(
         {
@@ -317,6 +339,7 @@ export const fetchAntigravityQuota = async (
         lastError = getApiCallErrorMessage(result);
         lastStatus = result.statusCode;
         if (result.statusCode === 429) {
+          if (mergedSummaryGroups.size > 0) return finishWithMergedSummary();
           throw createStatusError(lastError, 429);
         }
         if (result.statusCode === 403 || result.statusCode === 404) {
@@ -341,6 +364,15 @@ export const fetchAntigravityQuota = async (
         continue;
       }
 
+      if (isSummaryUrl) {
+        for (const group of groups) {
+          mergedSummaryGroups.set(group.id, group);
+        }
+        const offset = resolveResponseServerTimeOffsetMs(result.header);
+        if (offset !== null) mergedServerTimeOffsetMs = offset;
+        continue;
+      }
+
       const subscriptionResult = await subscriptionPromise;
       return {
         groups,
@@ -352,6 +384,7 @@ export const fetchAntigravityQuota = async (
     } catch (err: unknown) {
       const status = getStatusFromError(err);
       if (status === 429) {
+        if (mergedSummaryGroups.size > 0) return finishWithMergedSummary();
         throw err;
       }
       lastError = err instanceof Error ? err.message : t('common.unknown_error');
@@ -362,6 +395,10 @@ export const fetchAntigravityQuota = async (
         }
       }
     }
+  }
+
+  if (mergedSummaryGroups.size > 0) {
+    return finishWithMergedSummary();
   }
 
   if (hadSuccess) {
