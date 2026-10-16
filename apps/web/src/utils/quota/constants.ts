@@ -106,6 +106,10 @@ export const buildAntigravityUserAgent = ({
 
 export const ANTIGRAVITY_USER_AGENT = buildAntigravityUserAgent();
 
+// retrieveUserQuotaSummary on daily-cloudcode-pa only includes the Gemini group
+// (with the real weekly/5h meters) for desktop-client user agents >= 2.x.
+export const ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT = 'antigravity/2.23.1 windows/amd64';
+
 export const ANTIGRAVITY_REQUEST_HEADERS = {
   Authorization: 'Bearer $TOKEN$',
   'Content-Type': 'application/json',

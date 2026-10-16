@@ -38,6 +38,7 @@ import {
   ANTIGRAVITY_AVAILABLE_MODELS_URLS,
   ANTIGRAVITY_QUOTA_SUMMARY_URLS,
   ANTIGRAVITY_REQUEST_HEADERS,
+  ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT,
   CLAUDE_PROFILE_URL,
   CLAUDE_REQUEST_HEADERS,
   CLAUDE_USAGE_URL,
@@ -355,13 +356,16 @@ export const fetchAntigravityQuota = async (
 
   // Quota summary endpoints can disagree: the daily endpoint may omit groups
   // (e.g. Gemini) that prod still reports. Query every summary endpoint and
-  // merge groups by id; later endpoints (prod is last) win on conflict.
+  // merge groups by id; the first endpoint that reports a group wins.
   const summaryUrls = new Set<string>(ANTIGRAVITY_QUOTA_SUMMARY_URLS);
   const mergedSummaryGroups = new Map<string, AntigravityQuotaData['groups'][number]>();
   let mergedServerTimeOffsetMs: number | null = null;
+  let geminiFromFallbackSummary = false;
 
   const finishWithMergedSummary = async (): Promise<AntigravityQuotaData> => {
-    await applyDailyGeminiFiveHour(mergedSummaryGroups, authIndex, requestBody, requestConfig);
+    if (geminiFromFallbackSummary) {
+      await applyDailyGeminiFiveHour(mergedSummaryGroups, authIndex, requestBody, requestConfig);
+    }
     const subscriptionResult = await subscriptionPromise;
     return {
       groups: [...mergedSummaryGroups.values()],
@@ -383,7 +387,12 @@ export const fetchAntigravityQuota = async (
           authIndex,
           method: 'POST',
           url,
-          header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+          header: isSummaryUrl
+            ? {
+                ...ANTIGRAVITY_REQUEST_HEADERS,
+                'User-Agent': ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT,
+              }
+            : { ...ANTIGRAVITY_REQUEST_HEADERS },
           data: requestBody,
         },
         requestConfig
@@ -419,8 +428,15 @@ export const fetchAntigravityQuota = async (
       }
 
       if (isSummaryUrl) {
+        // Earlier endpoints (daily first) win: daily carries the meters the
+        // Antigravity app shows; prod's Gemini group uses a different meter.
+        const isPrimarySummary = url === ANTIGRAVITY_QUOTA_SUMMARY_URLS[0];
         for (const group of groups) {
+          if (mergedSummaryGroups.has(group.id)) continue;
           mergedSummaryGroups.set(group.id, group);
+          if (!isPrimarySummary && group.buckets.some((b) => /gemini/i.test(b.id))) {
+            geminiFromFallbackSummary = true;
+          }
         }
         const offset = resolveResponseServerTimeOffsetMs(result.header);
         if (offset !== null) mergedServerTimeOffsetMs = offset;

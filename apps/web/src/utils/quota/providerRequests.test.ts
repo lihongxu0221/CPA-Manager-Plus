@@ -26,6 +26,7 @@ import {
   ANTIGRAVITY_AVAILABLE_MODELS_URLS,
   ANTIGRAVITY_QUOTA_SUMMARY_URLS,
   ANTIGRAVITY_USER_AGENT,
+  ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT,
   CLAUDE_PROFILE_URL,
   CLAUDE_USAGE_URL,
   CODEX_RATE_LIMIT_RESET_CREDITS_URL,
@@ -4120,13 +4121,52 @@ describe('fetchAntigravityQuota', () => {
       'Gemini Models',
     ]);
     const claudeGroup = result.groups.find((group) => group.label === 'Claude and GPT models');
-    expect(claudeGroup?.buckets[0].remainingFraction).toBe(0.3);
+    expect(claudeGroup?.buckets[0].remainingFraction).toBe(0.2);
     const geminiGroup = result.groups.find((group) => group.label === 'Gemini Models');
     expect(geminiGroup?.buckets.map((b) => b.id).sort()).toEqual(['gemini-5h', 'gemini-weekly']);
     const fiveHour = geminiGroup?.buckets.find((b) => b.id === 'gemini-5h');
     expect(fiveHour?.remainingFraction).toBe(0.94);
     expect(fiveHour?.resetTime).toBe('2026-10-16T09:49:19Z');
     expect(geminiGroup?.buckets.find((b) => b.id === 'gemini-weekly')?.remainingFraction).toBe(0.5);
+  });
+
+  it('prefers the daily summary Gemini group and skips the per-model overlay', async () => {
+    mocks.getSubscription.mockResolvedValue(null);
+    const bucket = (id: string, window: string, remainingFraction: number) => ({
+      bucketId: id,
+      displayName: id,
+      window,
+      remainingFraction,
+      resetTime: '2026-10-22T23:49:19Z',
+    });
+    const ok = (groups: unknown[]) => ({
+      statusCode: 200,
+      hasStatusCode: true,
+      header: {},
+      bodyText: '',
+      body: { groups },
+    });
+    const gemini = (weekly: number, fiveHour: number) => ({
+      displayName: 'Gemini Models',
+      buckets: [bucket('gemini-weekly', 'weekly', weekly), bucket('gemini-5h', '5h', fiveHour)],
+    });
+    mocks.request
+      .mockResolvedValueOnce(ok([gemini(0.959, 0.94)]))
+      .mockResolvedValueOnce(ok([gemini(0.959, 0.94)]))
+      .mockResolvedValueOnce(ok([gemini(0.535, 1)]));
+
+    const result = await fetchAntigravityQuota(
+      { name: 'ag-daily.json', type: 'antigravity', authIndex: 'ag-d', project_id: 'p' },
+      t
+    );
+
+    expect(mocks.request).toHaveBeenCalledTimes(ANTIGRAVITY_QUOTA_SUMMARY_URLS.length);
+    expect(mocks.request.mock.calls[0][0].header['User-Agent']).toBe(
+      ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT
+    );
+    const geminiGroup = result.groups.find((group) => group.label === 'Gemini Models');
+    expect(geminiGroup?.buckets.find((b) => b.id === 'gemini-weekly')?.remainingFraction).toBe(0.959);
+    expect(geminiGroup?.buckets.find((b) => b.id === 'gemini-5h')?.remainingFraction).toBe(0.94);
   });
 
   it('preserves quota groups and marks rateLimited when subscription returns 429', async () => {
@@ -4283,8 +4323,11 @@ describe('fetchAntigravityQuota', () => {
       method: 'POST',
       header: expect.objectContaining({
         Authorization: 'Bearer $TOKEN$',
-        'User-Agent': ANTIGRAVITY_USER_AGENT,
+        'User-Agent': ANTIGRAVITY_QUOTA_SUMMARY_USER_AGENT,
       }),
+    });
+    expect(mocks.request.mock.calls[ANTIGRAVITY_QUOTA_SUMMARY_URLS.length][0]).toMatchObject({
+      header: expect.objectContaining({ 'User-Agent': ANTIGRAVITY_USER_AGENT }),
     });
   });
 
