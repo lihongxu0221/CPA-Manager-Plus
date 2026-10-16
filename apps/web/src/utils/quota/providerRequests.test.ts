@@ -4087,14 +4087,34 @@ describe('fetchAntigravityQuota', () => {
     mocks.request
       .mockResolvedValueOnce(ok([claude(0.2)]))
       .mockResolvedValueOnce({ statusCode: 404, hasStatusCode: true, header: {}, bodyText: 'nf' })
-      .mockResolvedValueOnce(ok([gemini, claude(0.3)]));
+      .mockResolvedValueOnce(ok([gemini, claude(0.3)]))
+      .mockResolvedValueOnce({
+        statusCode: 200,
+        hasStatusCode: true,
+        header: {},
+        bodyText: '',
+        body: {
+          models: {
+            'gemini-3.8-flash-tiered': {
+              quotaInfo: { remainingFraction: 0.94, resetTime: '2026-10-16T09:49:19Z' },
+            },
+            'gemini-2.5-pro': {
+              quotaInfo: { remainingFraction: 0.96, resetTime: '2026-10-16T09:49:19Z' },
+            },
+            'claude-sonnet-4-6': { quotaInfo: { remainingFraction: 0.1 } },
+          },
+        },
+      });
 
     const result = await fetchAntigravityQuota(
       { name: 'ag-merge.json', type: 'antigravity', authIndex: 'ag-m', project_id: 'p' },
       t
     );
 
-    expect(mocks.request).toHaveBeenCalledTimes(ANTIGRAVITY_QUOTA_SUMMARY_URLS.length);
+    expect(mocks.request).toHaveBeenCalledTimes(ANTIGRAVITY_QUOTA_SUMMARY_URLS.length + 1);
+    expect(mocks.request.mock.calls[3][0]).toMatchObject({
+      url: ANTIGRAVITY_AVAILABLE_MODELS_URLS[0],
+    });
     expect(result.groups.map((group) => group.label).sort()).toEqual([
       'Claude and GPT models',
       'Gemini Models',
@@ -4103,6 +4123,10 @@ describe('fetchAntigravityQuota', () => {
     expect(claudeGroup?.buckets[0].remainingFraction).toBe(0.3);
     const geminiGroup = result.groups.find((group) => group.label === 'Gemini Models');
     expect(geminiGroup?.buckets.map((b) => b.id).sort()).toEqual(['gemini-5h', 'gemini-weekly']);
+    const fiveHour = geminiGroup?.buckets.find((b) => b.id === 'gemini-5h');
+    expect(fiveHour?.remainingFraction).toBe(0.94);
+    expect(fiveHour?.resetTime).toBe('2026-10-16T09:49:19Z');
+    expect(geminiGroup?.buckets.find((b) => b.id === 'gemini-weekly')?.remainingFraction).toBe(0.5);
   });
 
   it('preserves quota groups and marks rateLimited when subscription returns 429', async () => {

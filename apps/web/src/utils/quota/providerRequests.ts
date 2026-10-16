@@ -278,6 +278,59 @@ const resolveResponseServerTimeOffsetMs = (
   return serverTime - Date.now();
 };
 
+// The prod summary reports a "gemini-5h" bucket that stays at 100% with a
+// rolling reset, while the real Gemini five-hour usage (what the Antigravity
+// app shows) is the per-model quotaInfo on the daily fetchAvailableModels
+// endpoint. Overlay the lowest Gemini model fraction onto the gemini 5h bucket.
+const applyDailyGeminiFiveHour = async (
+  groups: Map<string, AntigravityQuotaGroup>,
+  authIndex: string,
+  requestBody: string,
+  requestConfig: ReturnType<typeof createScopedApiRequestConfig> | undefined
+): Promise<void> => {
+  const target = [...groups.values()]
+    .flatMap((group) => group.buckets)
+    .find((bucket) => bucket.window === '5h' && /gemini/i.test(bucket.id));
+  if (!target) return;
+  try {
+    const result = await apiCallApi.request(
+      {
+        authIndex,
+        method: 'POST',
+        url: ANTIGRAVITY_AVAILABLE_MODELS_URLS[0],
+        header: { ...ANTIGRAVITY_REQUEST_HEADERS },
+        data: requestBody,
+      },
+      requestConfig
+    );
+    if (result.statusCode < 200 || result.statusCode >= 300) return;
+    const payload = parseAntigravityPayload(result.body ?? result.bodyText) as {
+      models?: Record<string, { quotaInfo?: { remainingFraction?: unknown; resetTime?: unknown } }>;
+    } | null;
+    const models = payload && isRecord(payload.models) ? payload.models : null;
+    if (!models) return;
+    let best: { fraction: number; resetTime?: string } | null = null;
+    for (const [modelId, info] of Object.entries(models)) {
+      if (!/^gemini/i.test(modelId)) continue;
+      const quota = isRecord(info) && isRecord(info.quotaInfo) ? info.quotaInfo : null;
+      if (!quota) continue;
+      const fraction = normalizeNumberValue(quota.remainingFraction as never);
+      if (fraction === null) continue;
+      if (!best || fraction < best.fraction) {
+        best = {
+          fraction,
+          resetTime: typeof quota.resetTime === 'string' ? quota.resetTime : undefined,
+        };
+      }
+    }
+    if (!best) return;
+    target.remainingFraction = best.fraction;
+    if (best.resetTime) target.resetTime = best.resetTime;
+  } catch {
+    // keep the summary value
+  }
+};
+
 export const fetchAntigravityQuota = async (
   file: AuthFileItem,
   t: TFunction,
@@ -308,6 +361,7 @@ export const fetchAntigravityQuota = async (
   let mergedServerTimeOffsetMs: number | null = null;
 
   const finishWithMergedSummary = async (): Promise<AntigravityQuotaData> => {
+    await applyDailyGeminiFiveHour(mergedSummaryGroups, authIndex, requestBody, requestConfig);
     const subscriptionResult = await subscriptionPromise;
     return {
       groups: [...mergedSummaryGroups.values()],
